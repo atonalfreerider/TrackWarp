@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 
-using System.Diagnostics;
 using Aurio.Matching;
 using Aurio.Matching.HaitsmaKalker2002;
 using Aurio.Project;
@@ -26,36 +25,30 @@ namespace TrackWarp;
 
 public class HaitsmaKalkerFingerprintingModel
 {
-    readonly Profile[] profiles;
-    FingerprintStore store;
+    FingerprintStore? store;
 
-    public event EventHandler FingerprintingFinished;
+    public event EventHandler? FingerprintingFinished;
 
-    public HaitsmaKalkerFingerprintingModel()
+    public HaitsmaKalkerFingerprintingModel(float fingerprintBerThreshold = FingerprintStore.DEFAULT_THRESHOLD)
     {
-        FingerprintBerThreshold = 0.45f;
+        FingerprintBerThreshold = fingerprintBerThreshold;
         FingerprintSize = FingerprintStore.DEFAULT_FINGERPRINT_SIZE;
-        profiles = FingerprintGenerator.GetProfiles();
+        Profile[] profiles = FingerprintGenerator.GetProfiles();
         SelectedProfile = profiles[0];
         Reset();
     }
 
-    public Profile[] Profiles
-    {
-        get { return profiles; }
-    }
+    Profile SelectedProfile { get; set; }
 
-    public Profile SelectedProfile { get; set; }
+    float FingerprintBerThreshold { get; set; }
 
-    public float FingerprintBerThreshold { get; set; }
-
-    public int FingerprintSize { get; set; }
+    int FingerprintSize { get; set; }
 
     /// <summary>
     /// Resets the model by clearing all data and configuring it with a new profile.
     /// </summary>
     /// <param name="profile">the new profile to configure the model with</param>
-    public void Reset(Profile profile)
+    void Reset(Profile profile)
     {
         SelectedProfile = profile ?? throw new ArgumentNullException(nameof(profile));
         store = new FingerprintStore(profile);
@@ -71,8 +64,14 @@ public class HaitsmaKalkerFingerprintingModel
 
     public void Fingerprint(List<AudioTrack> tracks, ProgressMonitor progressMonitor)
     {
-        HaitsmaKalkerFingerprintingModel selfReference = this;
+        if (store == null)
+        {
+            Console.WriteLine("No fingerprint store available. Exiting.");
+            return;
+        }
         
+        HaitsmaKalkerFingerprintingModel selfReference = this;
+
         foreach (AudioTrack track in tracks)
         {
             IProgressReporter? progressReporter = progressMonitor.BeginTask(
@@ -95,7 +94,7 @@ public class HaitsmaKalkerFingerprintingModel
             generator.Generate();
 
             progressReporter.Finish();
-            Debug.WriteLine(
+            Console.WriteLine(
                 "subfingerprint generation finished with "
                 + subFingerprintsCalculated
                 + " hashes"
@@ -107,13 +106,19 @@ public class HaitsmaKalkerFingerprintingModel
 
     public void FindAllMatches(Action<List<Match>> callback)
     {
+        if (store == null)
+        {
+            Console.WriteLine("No fingerprint store available. Exiting.");
+            return;
+        }
+        
         store.Threshold = FingerprintBerThreshold;
         store.FingerprintSize = FingerprintSize;
-        
+
         List<Match> matches = store.FindAllMatches();
-        
+
         matches = MatchProcessor.FilterDuplicateMatches(matches);
-        Debug.WriteLine(matches.Count + " matches found (filtered)");
+        Console.WriteLine(matches.Count + " matches found (filtered)");
 
         callback.Invoke(matches);
     }
