@@ -55,19 +55,21 @@ class Program
         HaitsmaKalkerFingerprintingModel model = new();
         model.FingerprintingFinished += delegate
         {
-            model.FindAllMatches(
-                new ProgressMonitor(),
-                TrackTimingCallback
-            );
+            model.FindAllMatches(TrackTimingCallback);
         };
 
         model.Reset();
-        // TODO add synchronization context for Task.Factory call inside of Fingerprint
         model.Fingerprint(audioTracks, new ProgressMonitor());
     }
     
     static void TrackTimingCallback(List<Match> matches)
     {
+        if (matches.Count == 0)
+        {
+            Console.WriteLine("No matches found. Exiting.");
+            return;
+        }
+        
         Dictionary<string, Dictionary<string, List<double>>> trackAndOffsetsToOtherTracks = [];
 
         foreach (Match match in matches)

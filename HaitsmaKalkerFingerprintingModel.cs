@@ -72,122 +72,49 @@ public class HaitsmaKalkerFingerprintingModel
     public void Fingerprint(List<AudioTrack> tracks, ProgressMonitor progressMonitor)
     {
         HaitsmaKalkerFingerprintingModel selfReference = this;
-        Stopwatch stopwatch = new Stopwatch();
-        stopwatch.Start();
-
-        long startMemory = GC.GetTotalMemory(false);
-
-        Task.Factory
-            .StartNew(
-                () =>
-                    Parallel.ForEach(
-                        tracks,
-                        new ParallelOptions
-                        {
-                            MaxDegreeOfParallelism = Environment.ProcessorCount
-                        },
-                        track =>
-                        {
-                            DateTime startTime = DateTime.Now;
-                            IProgressReporter? progressReporter = progressMonitor.BeginTask(
-                                "Generating sub-fingerprints for " + track.FileInfo.Name,
-                                true
-                            );
-                            FingerprintGenerator generator = new FingerprintGenerator(SelectedProfile, track);
-                            int subFingerprintsCalculated = 0;
-
-                            generator.SubFingerprintsGenerated +=
-                                new EventHandler<SubFingerprintsGeneratedEventArgs>(
-                                    delegate(object s2, SubFingerprintsGeneratedEventArgs e2)
-                                    {
-                                        subFingerprintsCalculated += e2.SubFingerprints.Count;
-                                        progressReporter.ReportProgress(
-                                            (double)e2.Index / e2.Indices * 100
-                                        );
-                                        store.Add(e2);
-                                    }
-                                );
-
-                            generator.Generate();
-
-                            progressReporter.Finish();
-                            Debug.WriteLine(
-                                "subfingerprint generation finished with "
-                                + subFingerprintsCalculated
-                                + " hashes in "
-                                + (DateTime.Now - startTime)
-                            );
-                        }
-                    )
-            )
-            .ContinueWith(
-                task =>
-                {
-                    // all running generator tasks have finished
-                    stopwatch.Stop();
-                    long memory = GC.GetTotalMemory(false) - startMemory;
-                    Debug.WriteLine(
-                        "Fingerprinting finished in "
-                        + stopwatch.Elapsed
-                        + " (mem: "
-                        + (memory / 1024 / 1024)
-                        + " MB)"
-                    );
-
-                    FingerprintingFinished?.Invoke(selfReference, EventArgs.Empty);
-                },
-                TaskScheduler.FromCurrentSynchronizationContext()
+        
+        foreach (AudioTrack track in tracks)
+        {
+            IProgressReporter? progressReporter = progressMonitor.BeginTask(
+                "Generating sub-fingerprints for " + track.FileInfo.Name,
+                true
             );
+            FingerprintGenerator generator = new FingerprintGenerator(SelectedProfile, track);
+            int subFingerprintsCalculated = 0;
+
+            generator.SubFingerprintsGenerated +=
+                delegate(object _, SubFingerprintsGeneratedEventArgs e2)
+                {
+                    subFingerprintsCalculated += e2.SubFingerprints.Count;
+                    progressReporter.ReportProgress(
+                        (double)e2.Index / e2.Indices * 100
+                    );
+                    store.Add(e2);
+                };
+
+            generator.Generate();
+
+            progressReporter.Finish();
+            Debug.WriteLine(
+                "subfingerprint generation finished with "
+                + subFingerprintsCalculated
+                + " hashes"
+            );
+        }
+
+        FingerprintingFinished?.Invoke(selfReference, EventArgs.Empty);
     }
 
-    public List<Match> FindAllMatches(
-        ProgressMonitor progressMonitor,
-        Action<List<Match>> callback
-    )
+    public void FindAllMatches(Action<List<Match>> callback)
     {
-        List<Match> matches = null;
+        store.Threshold = FingerprintBerThreshold;
+        store.FingerprintSize = FingerprintSize;
+        
+        List<Match> matches = store.FindAllMatches();
+        
+        matches = MatchProcessor.FilterDuplicateMatches(matches);
+        Debug.WriteLine(matches.Count + " matches found (filtered)");
 
-        // NOTE The following task is passed the "default" task scheduler, because otherwise
-        //      it uses the "current" scheduler, which can be the UI scheduler when called
-        //      from a task run by the TaskScheduler.FromCurrentSynchronizationContext(), leading
-        //      to a blocked UI.
-
-        Task.Factory
-            .StartNew(
-                () =>
-                {
-                    IProgressReporter? progressReporter = progressMonitor.BeginTask(
-                        "Matching hashes...",
-                        true
-                    );
-
-                    void progressCallback(double progress)
-                    {
-                        progressReporter.ReportProgress(progress);
-                    }
-
-                    Stopwatch sw = new();
-                    sw.Start();
-                    store.Threshold = FingerprintBerThreshold;
-                    store.FingerprintSize = FingerprintSize;
-                    matches = store.FindAllMatches(progressCallback);
-                    sw.Stop();
-                    Debug.WriteLine(matches.Count + " matches found in {0}", sw.Elapsed);
-
-                    matches = MatchProcessor.FilterDuplicateMatches(matches, progressCallback);
-                    Debug.WriteLine(matches.Count + " matches found (filtered)");
-
-                    progressReporter.Finish();
-                },
-                CancellationToken.None,
-                TaskCreationOptions.None,
-                TaskScheduler.Default
-            ) // Use default scheduler, see NOTE above
-            .ContinueWith(
-                task => { callback.Invoke(matches); },
-                TaskScheduler.FromCurrentSynchronizationContext()
-            );
-
-        return matches;
+        callback.Invoke(matches);
     }
 }
