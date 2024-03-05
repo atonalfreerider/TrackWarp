@@ -10,6 +10,10 @@ using Aurio.Project;
 using Aurio.Resampler;
 using Aurio.Streams;
 using Aurio.TaskMonitor;
+using NAudio.Wave;
+using VarispeedDemo.SoundTouch;
+
+namespace TrackWarp;
 
 class Program
 {
@@ -17,20 +21,22 @@ class Program
     {
         RootCommand rootCommand =
         [
-            new Argument<string>("BaseAudioPath"),
+            new Argument<string>("BaseAudioPath",
+                "Path to the audio file that will serve as the base mapping for the warped audio."),
 
-            new Argument<string>("ConformAudioPath"),
+            new Argument<string>("ComparisonAudioPath",
+                "Path to the audio file that will provide the mapping deltas to the base audio."),
 
-            new Argument<string>("WarpAudioPath"),
+            new Argument<string>("WarpAudioPath",
+                "Path to the audio file that will be warped to match the base audio, using the mappings."),
 
-            new Option<float>(["--fingerprint-ber-threshold", "-t"],
-                getDefaultValue: () => FingerprintStore.DEFAULT_THRESHOLD,
-                description: "The BER threshold for fingerprint matching. Defaults to 0.35.")
+            new Argument<string>("OutputAudioPath",
+                "The final output wav file path.")
         ];
 
         rootCommand.Description = "Conform audio track to base track";
 
-        rootCommand.Handler = CommandHandler.Create<string, string, string, float>(Parse);
+        rootCommand.Handler = CommandHandler.Create<string, string, string, string>(Parse);
 
         rootCommand.Invoke(args);
 
@@ -39,9 +45,9 @@ class Program
 
     static void Parse(
         string baseAudioPath,
-        string conformAudioPath,
+        string comparisonAudioPath,
         string warpAudioPath,
-        float fingerprintBerThreshold)
+        string outputAudioPath)
     {
         // Use PFFFT as FFT implementation
         FFTFactory.Factory = new Aurio.PFFFT.FFTFactory();
@@ -51,7 +57,7 @@ class Program
         AudioStreamFactory.AddFactory(new FFmpegAudioStreamFactory());
 
         AudioTrack baseAudioTrack = new(new FileInfo(baseAudioPath));
-        AudioTrack conformAudioTrack = new(new FileInfo(conformAudioPath));
+        AudioTrack conformAudioTrack = new(new FileInfo(comparisonAudioPath));
 
         List<Match> matches = TimeWarp(
             TimeWarpType.DTW,
@@ -65,7 +71,9 @@ class Program
             false,
             false,
             30,
-            100
+            100,
+            true,
+            true
         );
 
         if (matches.Count == 0)
@@ -74,11 +82,7 @@ class Program
             return;
         }
 
-        foreach (Match match in matches)
-        {
-            Console.WriteLine(match.Track1Time.ToString(@"hh\:mm\:ss\.fff") + " -> " +
-                              match.Track2Time.ToString(@"hh\:mm\:ss\.fff"));
-        }
+        WriteToWav(outputAudioPath, matches, warpAudioPath);
     }
 
     static List<Match> TimeWarp(
@@ -93,15 +97,12 @@ class Program
         bool cueIn,
         bool cueOut,
         int searchWidth,
-        int filterSize
-    )
+        int filterSize,
+        bool timeWarpInOutCue,
+        bool timeWarpSmoothing)
     {
-        TimeSpan TimeWarpSearchWidth = TimeSpan.FromSeconds(searchWidth);
+        TimeSpan timeWarpSearchWidth = TimeSpan.FromSeconds(searchWidth);
         ProgressMonitor progressMonitor = new ProgressMonitor();
-
-        int TimeWarpFilterSize = filterSize;
-        const bool TimeWarpSmoothing = true;
-        const bool TimeWarpInOutCue = true;
 
         IAudioStream s1 = t1.CreateAudioStream();
         IAudioStream s2 = t2.CreateAudioStream();
@@ -121,8 +122,8 @@ class Program
         DTW? dtw = type switch
         {
             // execute time warping
-            TimeWarpType.DTW => new DTW(TimeWarpSearchWidth, progressMonitor),
-            TimeWarpType.OLTW => new OLTW2(TimeWarpSearchWidth, progressMonitor),
+            TimeWarpType.DTW => new DTW(timeWarpSearchWidth, progressMonitor),
+            TimeWarpType.OLTW => new OLTW2(timeWarpSearchWidth, progressMonitor),
             _ => null
         };
 
@@ -139,7 +140,7 @@ class Program
         }
 
         // convert resulting path to matches and filter them
-        int smoothingWidth = Math.Max(1, Math.Min(TimeWarpFilterSize / 10, TimeWarpFilterSize));
+        int smoothingWidth = Math.Max(1, Math.Min(filterSize / 10, filterSize));
         List<Match> matches = [];
         float maxSimilarity = 0; // needed for normalization
         IProgressReporter progressReporter = progressMonitor.BeginTask(
@@ -158,7 +159,7 @@ class Program
          * the start and end points don't match if there is time drift so it is better to leave them out in those
          * areas... in those short a few second long intervals the drict actually will never be that extreme that
          * someone would notice it anyway. */
-        if (TimeWarpInOutCue)
+        if (timeWarpInOutCue)
         {
             int startIndex = 0;
             int endIndex = path.Count;
@@ -166,7 +167,7 @@ class Program
             // this needs a temporally ordered mapping path (no matter if ascending or descending)
             foreach (Tuple<TimeSpan, TimeSpan> mapping in path)
             {
-                if (cueIn && (mapping.Item1 < TimeWarpSearchWidth || mapping.Item2 < TimeWarpSearchWidth))
+                if (cueIn && (mapping.Item1 < timeWarpSearchWidth || mapping.Item2 < timeWarpSearchWidth))
                 {
                     startIndex++;
                 }
@@ -174,8 +175,8 @@ class Program
                 if (
                     cueOut
                     && (
-                        mapping.Item1 > (t1To - t1From - TimeWarpSearchWidth)
-                        || mapping.Item2 > (t2To - t2From - TimeWarpSearchWidth)
+                        mapping.Item1 > (t1To - t1From - timeWarpSearchWidth)
+                        || mapping.Item2 > (t2To - t2From - timeWarpSearchWidth)
                     )
                 )
                 {
@@ -186,7 +187,7 @@ class Program
             path = path.GetRange(startIndex, endIndex - startIndex);
         }
 
-        for (int i = 0; i < path.Count; i += TimeWarpFilterSize)
+        for (int i = 0; i < path.Count; i += filterSize)
         {
             //List<Tuple<TimeSpan, TimeSpan>> section = path.GetRange(i, Math.Min(path.Count - i, filterSize));
             List<Tuple<TimeSpan, TimeSpan>> smoothingSection = path.GetRange(
@@ -200,7 +201,7 @@ class Program
                 throw new InvalidOperationException("must not happen");
             }
 
-            if (smoothingSection.Count == 1 || !TimeWarpSmoothing || i == 0)
+            if (smoothingSection.Count == 1 || !timeWarpSmoothing || i == 0)
             {
                 // do nothing, match doesn't need any processing
                 // the first and last match must not be smoothed since they must sit at the bounds
@@ -245,7 +246,7 @@ class Program
             }
 
             matches.Add(
-                new Match()
+                new Match
                 {
                     Track1 = t1,
                     Track1Time = match.Item1 + t1From,
@@ -257,15 +258,15 @@ class Program
             );
 
             progressReporter.ReportProgress(progress / totalProgress * 100);
-            progress += TimeWarpFilterSize;
+            progress += filterSize;
         }
 
         // add last match if it hasn't been added
-        if (path.Count > 0 && path.Count % TimeWarpFilterSize != 1)
+        if (path.Count > 0 && path.Count % filterSize != 1)
         {
             Tuple<TimeSpan, TimeSpan> lastMatch = path[^1];
             matches.Add(
-                new Match()
+                new Match
                 {
                     Track1 = t1,
                     Track1Time = lastMatch.Item1 + t1From,
@@ -283,5 +284,50 @@ class Program
         s2.Close();
 
         return matches;
+    }
+
+    static void WriteToWav(string outputAudioPath, List<Match> matches, string warpAudioPath)
+    {
+        using Mp3SampleProvider provider = new Mp3SampleProvider(warpAudioPath);
+
+        ISampleProvider warpSampleProvider = provider.GetSampleProvider();
+
+        // Prepare the audio for time stretching
+        VarispeedSampleProvider stretchProvider = new VarispeedSampleProvider(
+            warpSampleProvider,
+            100,
+            new SoundTouchProfile(false, true));
+
+        // Create a new WaveFileWriter to output the warped audio
+        using WaveFileWriter writer = new WaveFileWriter(outputAudioPath, stretchProvider.WaveFormat);
+        float lastFactor = 1.0f; // Start with no stretch
+        foreach (Match match in matches)
+        {
+            // Calculate the time stretch factor required to align this peak with the corresponding peak in the base track
+            double timeDifference = (match.Track2Time - match.Track1Time).TotalSeconds;
+            if (timeDifference != 0)
+            {
+                // Calculate the new stretch factor, ensuring no division by zero
+                double newFactor = (match.Track2Time.TotalSeconds + timeDifference) / match.Track2Time.TotalSeconds;
+                // Apply the new time stretch factor if it has changed
+                if (Math.Abs(newFactor - lastFactor) > 0.01) // Adjust threshold to your needs
+                {
+                    Console.WriteLine("Adjusting playback rate to " + newFactor);
+                    stretchProvider.PlaybackRate = (float)newFactor;
+                    lastFactor = (float)newFactor;
+                }
+            }
+
+            // Read samples from the stretch provider and write them to the output file
+            float[] buffer =
+                new float[writer.WaveFormat.SampleRate * writer.WaveFormat.Channels]; // One second of audio
+            int samplesRead;
+            while ((samplesRead = stretchProvider.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                writer.WriteSamples(buffer, 0, samplesRead);
+            }
+        }
+
+        Console.WriteLine("Wrote warped audio to " + outputAudioPath);
     }
 }
