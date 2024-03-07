@@ -4,11 +4,16 @@ using Aurio;
 using Aurio.FFmpeg;
 using Aurio.FFT;
 using Aurio.Matching;
+using Aurio.Matching.Dixon2005;
 using Aurio.Matching.HaitsmaKalker2002;
 using Aurio.Project;
 using Aurio.Resampler;
+using Aurio.Streams;
 using Aurio.TaskMonitor;
-using TrackWarp;
+using NAudio.Wave;
+using VarispeedDemo.SoundTouch;
+
+namespace TrackWarp;
 
 class Program
 {
@@ -16,20 +21,22 @@ class Program
     {
         RootCommand rootCommand =
         [
-            new Argument<string>("BaseAudioPath"),
+            new Argument<string>("BaseAudioPath",
+                "Path to the audio file that will serve as the base mapping for the warped audio."),
 
-            new Argument<string>("ConformAudioPath"),
+            new Argument<string>("ComparisonAudioPath",
+                "Path to the audio file that will provide the mapping deltas to the base audio."),
 
-            new Argument<string>("WarpAudioPath"),
+            new Argument<string>("WarpAudioPath",
+                "Path to the audio file that will be warped to match the base audio, using the mappings."),
 
-            new Option<float>(["--fingerprint-ber-threshold", "-t"],
-                getDefaultValue: () => FingerprintStore.DEFAULT_THRESHOLD,
-                description: "The BER threshold for fingerprint matching. Defaults to 0.35.")
+            new Argument<string>("OutputAudioPath",
+                "The final output wav file path.")
         ];
 
         rootCommand.Description = "Conform audio track to base track";
 
-        rootCommand.Handler = CommandHandler.Create<string, string, string, float>(Parse);
+        rootCommand.Handler = CommandHandler.Create<string, string, string, string>(Parse);
 
         rootCommand.Invoke(args);
 
@@ -38,9 +45,9 @@ class Program
 
     static void Parse(
         string baseAudioPath,
-        string conformAudioPath,
+        string comparisonAudioPath,
         string warpAudioPath,
-        float fingerprintBerThreshold)
+        string outputAudioPath)
     {
         // Use PFFFT as FFT implementation
         FFTFactory.Factory = new Aurio.PFFFT.FFTFactory();
@@ -50,70 +57,277 @@ class Program
         AudioStreamFactory.AddFactory(new FFmpegAudioStreamFactory());
 
         AudioTrack baseAudioTrack = new(new FileInfo(baseAudioPath));
-        AudioTrack conformAudioTrack = new(new FileInfo(conformAudioPath));
+        AudioTrack conformAudioTrack = new(new FileInfo(comparisonAudioPath));
 
-        List<AudioTrack> audioTracks =
-        [
+        List<Match> matches = TimeWarp(
+            TimeWarpType.DTW,
             baseAudioTrack,
-            conformAudioTrack
-        ];
+            TimeSpan.Zero,
+            baseAudioTrack.Length,
+            conformAudioTrack,
+            TimeSpan.Zero,
+            conformAudioTrack.Length,
+            true,
+            false,
+            false,
+            30,
+            100,
+            true,
+            true
+        );
 
-        HaitsmaKalkerFingerprintingModel model = new(fingerprintBerThreshold);
-        model.FingerprintingFinished += delegate { model.FindAllMatches(TrackTimingCallback); };
-
-        model.Reset();
-        model.Fingerprint(audioTracks, new ProgressMonitor());
-    }
-
-    static void TrackTimingCallback(List<Match> matches)
-    {
         if (matches.Count == 0)
         {
             Console.WriteLine("No matches found. Exiting.");
             return;
         }
 
-        Dictionary<string, Dictionary<string, List<double>>> trackAndOffsetsToOtherTracks = [];
+        WriteToWav(outputAudioPath, matches, warpAudioPath);
+    }
 
+    static List<Match> TimeWarp(
+        TimeWarpType type,
+        AudioTrack t1,
+        TimeSpan t1From,
+        TimeSpan t1To,
+        AudioTrack t2,
+        TimeSpan t2From,
+        TimeSpan t2To,
+        bool calculateSimilarity,
+        bool cueIn,
+        bool cueOut,
+        int searchWidth,
+        int filterSize,
+        bool timeWarpInOutCue,
+        bool timeWarpSmoothing)
+    {
+        TimeSpan timeWarpSearchWidth = TimeSpan.FromSeconds(searchWidth);
+        ProgressMonitor progressMonitor = new ProgressMonitor();
+
+        IAudioStream s1 = t1.CreateAudioStream();
+        IAudioStream s2 = t2.CreateAudioStream();
+        s1 = new CropStream(
+            s1,
+            TimeUtil.TimeSpanToBytes(t1From, s1.Properties),
+            TimeUtil.TimeSpanToBytes(t1To, s1.Properties)
+        );
+        s2 = new CropStream(
+            s2,
+            TimeUtil.TimeSpanToBytes(t2From, s2.Properties),
+            TimeUtil.TimeSpanToBytes(t2To, s2.Properties)
+        );
+
+        List<Tuple<TimeSpan, TimeSpan>> path = null;
+
+        DTW? dtw = type switch
+        {
+            // execute time warping
+            TimeWarpType.DTW => new DTW(timeWarpSearchWidth, progressMonitor),
+            TimeWarpType.OLTW => new OLTW2(timeWarpSearchWidth, progressMonitor),
+            _ => null
+        };
+
+        if (dtw == null)
+        {
+            return [];
+        }
+
+        path = dtw.Execute(s1, s2);
+
+        if (path == null)
+        {
+            return [];
+        }
+
+        // convert resulting path to matches and filter them
+        int smoothingWidth = Math.Max(1, Math.Min(filterSize / 10, filterSize));
+        List<Match> matches = [];
+        float maxSimilarity = 0; // needed for normalization
+        IProgressReporter progressReporter = progressMonitor.BeginTask(
+            "post-process resulting path...",
+            true
+        );
+        double totalProgress = path.Count;
+        double progress = 0;
+
+        /* Leave out matches in the in/out cue areas...
+         * The matches in the interval at the beginning and end of the calculated time warping path with a width
+         * equal to the search width should be left out because they might not be correct - since the time warp
+         * path needs to start at (0,0) in the matrix and end at (m,n), they would only be correct if the path gets
+         * calculated between two synchronization points. Paths calculated from the start of a track to the first
+         * sync point, or from the last sync point to end of the track are probably wrong in this interval since
+         * the start and end points don't match if there is time drift so it is better to leave them out in those
+         * areas... in those short a few second long intervals the drict actually will never be that extreme that
+         * someone would notice it anyway. */
+        if (timeWarpInOutCue)
+        {
+            int startIndex = 0;
+            int endIndex = path.Count;
+
+            // this needs a temporally ordered mapping path (no matter if ascending or descending)
+            foreach (Tuple<TimeSpan, TimeSpan> mapping in path)
+            {
+                if (cueIn && (mapping.Item1 < timeWarpSearchWidth || mapping.Item2 < timeWarpSearchWidth))
+                {
+                    startIndex++;
+                }
+
+                if (
+                    cueOut
+                    && (
+                        mapping.Item1 > (t1To - t1From - timeWarpSearchWidth)
+                        || mapping.Item2 > (t2To - t2From - timeWarpSearchWidth)
+                    )
+                )
+                {
+                    endIndex--;
+                }
+            }
+
+            path = path.GetRange(startIndex, endIndex - startIndex);
+        }
+
+        for (int i = 0; i < path.Count; i += filterSize)
+        {
+            //List<Tuple<TimeSpan, TimeSpan>> section = path.GetRange(i, Math.Min(path.Count - i, filterSize));
+            List<Tuple<TimeSpan, TimeSpan>> smoothingSection = path.GetRange(
+                Math.Max(0, i - smoothingWidth / 2),
+                Math.Min(path.Count - i, smoothingWidth)
+            );
+            Tuple<TimeSpan, TimeSpan> match = path[i];
+
+            if (smoothingSection.Count == 0)
+            {
+                throw new InvalidOperationException("must not happen");
+            }
+
+            if (smoothingSection.Count == 1 || !timeWarpSmoothing || i == 0)
+            {
+                // do nothing, match doesn't need any processing
+                // the first and last match must not be smoothed since they must sit at the bounds
+            }
+            else
+            {
+                List<TimeSpan> offsets =
+                    [..smoothingSection.Select(t => t.Item2 - t.Item1).OrderBy(t => t)];
+                int middle = offsets.Count / 2;
+
+                // calculate median
+                // http://en.wikiversity.org/wiki/Primary_mathematics/Average,_median,_and_mode#Median
+                TimeSpan smoothedDriftTime =
+                    new((offsets[middle - 1] + offsets[middle]).Ticks / 2);
+                match = new Tuple<TimeSpan, TimeSpan>(
+                    match.Item1,
+                    match.Item1 + smoothedDriftTime
+                );
+            }
+
+            float similarity = calculateSimilarity
+                ? (float)
+                Math.Abs(
+                    CrossCorrelation.Correlate(
+                        s1,
+                        new Interval(
+                            match.Item1.Ticks,
+                            match.Item1.Ticks + TimeUtil.SECS_TO_TICKS
+                        ),
+                        s2,
+                        new Interval(
+                            match.Item2.Ticks,
+                            match.Item2.Ticks + TimeUtil.SECS_TO_TICKS
+                        )
+                    )
+                )
+                : 1;
+
+            if (similarity > maxSimilarity)
+            {
+                maxSimilarity = similarity;
+            }
+
+            matches.Add(
+                new Match
+                {
+                    Track1 = t1,
+                    Track1Time = match.Item1 + t1From,
+                    Track2 = t2,
+                    Track2Time = match.Item2 + t2From,
+                    Similarity = similarity,
+                    Source = type.ToString()
+                }
+            );
+
+            progressReporter.ReportProgress(progress / totalProgress * 100);
+            progress += filterSize;
+        }
+
+        // add last match if it hasn't been added
+        if (path.Count > 0 && path.Count % filterSize != 1)
+        {
+            Tuple<TimeSpan, TimeSpan> lastMatch = path[^1];
+            matches.Add(
+                new Match
+                {
+                    Track1 = t1,
+                    Track1Time = lastMatch.Item1 + t1From,
+                    Track2 = t2,
+                    Track2Time = lastMatch.Item2 + t2From,
+                    Similarity = 1,
+                    Source = type.ToString()
+                }
+            );
+        }
+
+        progressReporter.Finish();
+
+        s1.Close();
+        s2.Close();
+
+        return matches;
+    }
+
+    static void WriteToWav(string outputAudioPath, List<Match> matches, string warpAudioPath)
+    {
+        using Mp3SampleProvider provider = new Mp3SampleProvider(warpAudioPath);
+
+        ISampleProvider warpSampleProvider = provider.GetSampleProvider();
+
+        // Prepare the audio for time stretching
+        VarispeedSampleProvider stretchProvider = new VarispeedSampleProvider(
+            warpSampleProvider,
+            100,
+            new SoundTouchProfile(false, true));
+
+        // Create a new WaveFileWriter to output the warped audio
+        using WaveFileWriter writer = new WaveFileWriter(outputAudioPath, stretchProvider.WaveFormat);
+        float lastFactor = 1.0f; // Start with no stretch
         foreach (Match match in matches)
         {
-            string trackName = match.Track1.FileInfo.FullName;
-            string otherTrackName = match.Track2.FileInfo.FullName;
-            double offset = match.Offset.TotalSeconds;
-            trackAndOffsetsToOtherTracks.TryGetValue(trackName, out Dictionary<string, List<double>>? otherTracks);
-            if (otherTracks == null)
+            // Calculate the time stretch factor required to align this peak with the corresponding peak in the base track
+            double timeDifference = (match.Track2Time - match.Track1Time).TotalSeconds;
+            if (timeDifference != 0)
             {
-                otherTracks = new Dictionary<string, List<double>>();
-                trackAndOffsetsToOtherTracks.Add(trackName, otherTracks);
+                // Calculate the new stretch factor, ensuring no division by zero
+                double newFactor = (match.Track2Time.TotalSeconds + timeDifference) / match.Track2Time.TotalSeconds;
+                // Apply the new time stretch factor if it has changed
+                if (Math.Abs(newFactor - lastFactor) > 0.01) // Adjust threshold to your needs
+                {
+                    Console.WriteLine("Adjusting playback rate to " + newFactor);
+                    stretchProvider.PlaybackRate = (float)newFactor;
+                    lastFactor = (float)newFactor;
+                }
             }
 
-            otherTracks.TryGetValue(otherTrackName, out List<double>? offsets);
-            if (offsets == null)
+            // Read samples from the stretch provider and write them to the output file
+            float[] buffer =
+                new float[writer.WaveFormat.SampleRate * writer.WaveFormat.Channels]; // One second of audio
+            int samplesRead;
+            while ((samplesRead = stretchProvider.Read(buffer, 0, buffer.Length)) > 0)
             {
-                offsets = new List<double>();
-                otherTracks.Add(otherTrackName, offsets);
+                writer.WriteSamples(buffer, 0, samplesRead);
             }
-
-            offsets.Add(offset);
         }
 
-        // get the median offset, incrementing from the first entry to the last
-        KeyValuePair<string, Dictionary<string, List<double>>> maxKeyValuePair =
-            trackAndOffsetsToOtherTracks.MaxBy(kv =>
-                kv.Value.Count); // Take the first item after ordering, which will have the maximum count
-
-        Dictionary<string, double> trackOffsets = new() { { maxKeyValuePair.Key, 0 } };
-
-        foreach ((string other, List<double> offsets) in maxKeyValuePair.Value)
-        {
-            offsets.Sort();
-            double medianOffset = offsets[offsets.Count / 2];
-            trackOffsets.Add(other, medianOffset);
-        }
-
-        foreach (KeyValuePair<string, double> keyValuePair in trackOffsets)
-        {
-            Console.WriteLine(keyValuePair.Key + " " + keyValuePair.Value);
-        }
+        Console.WriteLine("Wrote warped audio to " + outputAudioPath);
     }
 }

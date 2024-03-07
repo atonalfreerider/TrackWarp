@@ -11,6 +11,8 @@
       <PackageReference Include="Aurio.FFmpeg" Version="4.2.1" />
       <PackageReference Include="Aurio.PFFFT" Version="4.2.1" />
       <PackageReference Include="Aurio.Soxr" Version="4.2.1" />
+      <PackageReference Include="NAudio" Version="2.2.1" />
+      <PackageReference Include="SoundTouch.Net" Version="2.3.2" />
       <PackageReference Include="System.CommandLine.NamingConventionBinder" Version="2.0.0-beta4.22272.1" />
     </ItemGroup>
 
