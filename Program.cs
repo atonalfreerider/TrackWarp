@@ -5,7 +5,6 @@ using Aurio.FFmpeg;
 using Aurio.FFT;
 using Aurio.Matching;
 using Aurio.Matching.Dixon2005;
-using Aurio.Matching.HaitsmaKalker2002;
 using Aurio.Project;
 using Aurio.Resampler;
 using Aurio.Streams;

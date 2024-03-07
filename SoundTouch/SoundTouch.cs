@@ -5,9 +5,9 @@ namespace VarispeedDemo.SoundTouch;
 
 class SoundTouch : IDisposable
 {
-    private IntPtr handle;
-    private string versionString;
-    private readonly bool is64Bit;
+    IntPtr handle;
+    string versionString;
+    readonly bool is64Bit;
     public SoundTouch()
     {
         is64Bit = Marshal.SizeOf<IntPtr>() == 8;
@@ -57,7 +57,7 @@ class SoundTouch : IDisposable
             SoundTouchInterop32.soundtouch_setChannels(handle, (uint)channels);
     }
 
-    private void DestroyInstance()
+    void DestroyInstance()
     {
         if (handle != IntPtr.Zero)
         {

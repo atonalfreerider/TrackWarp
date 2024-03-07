@@ -4,29 +4,29 @@ namespace TrackWarp;
 
 public class Mp3SampleProvider : IDisposable
 {
-    private readonly string _filePath;
-    private Mp3FileReader _mp3Reader;
-    private ISampleProvider _sampleProvider;
+    readonly string filePath;
+    Mp3FileReader mp3Reader;
+    ISampleProvider sampleProvider;
 
     public Mp3SampleProvider(string filePath)
     {
-        _filePath = filePath;
+        this.filePath = filePath;
         Initialize();
     }
 
-    private void Initialize()
+    void Initialize()
     {
-        _mp3Reader = new Mp3FileReader(_filePath);
-        _sampleProvider = _mp3Reader.ToSampleProvider();
+        mp3Reader = new Mp3FileReader(filePath);
+        sampleProvider = mp3Reader.ToSampleProvider();
     }
 
     public ISampleProvider GetSampleProvider()
     {
-        return _sampleProvider;
+        return sampleProvider;
     }
 
     public void Dispose()
     {
-        _mp3Reader?.Dispose();
+        mp3Reader?.Dispose();
     }
 }
