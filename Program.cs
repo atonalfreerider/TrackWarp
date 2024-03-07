@@ -300,7 +300,7 @@ class Program
         VarispeedSampleProvider stretchProvider = new(
             warpSampleProvider,
             100,
-            new SoundTouchProfile(false, true));
+            new SoundTouchProfile(true, true));
 
         // Create a new WaveFileWriter to output the warped audio
         string waveOutPath = Path.ChangeExtension(outputAudioPath, ".wav");
@@ -310,7 +310,7 @@ class Program
             Match match = matches[i];
             Match nextMatch = matches[i + 1];
 
-            double runTime = nextMatch.Track1Time.TotalSeconds - match.Track1Time.TotalSeconds;
+            double runTime = nextMatch.Track2Time.TotalSeconds - match.Track2Time.TotalSeconds;
 
             // Calculate the time stretch factor required to align this peak with the corresponding peak in the base track
             double timeDifference = nextMatch.Offset.TotalSeconds;
