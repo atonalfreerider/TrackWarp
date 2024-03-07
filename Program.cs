@@ -84,10 +84,10 @@ class Program
 
         WriteToWav(outputAudioPath, matches, warpAudioPath);
         ConvertToMp3(outputAudioPath);
-        
+
         string waveOutPath = Path.ChangeExtension(outputAudioPath, ".wav");
         File.Delete(waveOutPath);
-        
+
         Console.WriteLine("Wrote warped audio to " + outputAudioPath);
     }
 
@@ -123,8 +123,6 @@ class Program
             TimeUtil.TimeSpanToBytes(t2To, s2.Properties)
         );
 
-        List<Tuple<TimeSpan, TimeSpan>> path = null;
-
         DTW? dtw = type switch
         {
             // execute time warping
@@ -138,7 +136,7 @@ class Program
             return [];
         }
 
-        path = dtw.Execute(s1, s2);
+        List<Tuple<TimeSpan, TimeSpan>>? path = dtw.Execute(s1, s2);
 
         if (path == null)
         {
@@ -292,7 +290,7 @@ class Program
         return matches;
     }
 
-    static void WriteToWav(string outputAudioPath, List<Match> matches, string warpAudioPath)
+    static void WriteToWav(string outputAudioPath, IReadOnlyList<Match> matches, string warpAudioPath)
     {
         using Mp3SampleProvider provider = new(warpAudioPath);
 
@@ -307,35 +305,33 @@ class Program
         // Create a new WaveFileWriter to output the warped audio
         string waveOutPath = Path.ChangeExtension(outputAudioPath, ".wav");
         using WaveFileWriter writer = new(waveOutPath, stretchProvider.WaveFormat);
-        float lastFactor = 1.0f; // Start with no stretch
-        foreach (Match match in matches)
+        for (int i = 0; i < matches.Count - 1; i++)
         {
+            Match match = matches[i];
+            Match nextMatch = matches[i + 1];
+
+            double runTime = nextMatch.Track1Time.TotalSeconds - match.Track1Time.TotalSeconds;
+
             // Calculate the time stretch factor required to align this peak with the corresponding peak in the base track
-            double timeDifference = (match.Track2Time - match.Track1Time).TotalSeconds;
-            if (timeDifference != 0)
+            double timeDifference = nextMatch.Offset.TotalSeconds;
+            if (Math.Abs(timeDifference) > float.Epsilon)
             {
                 // Calculate the new stretch factor, ensuring no division by zero
-                double newFactor = (match.Track2Time.TotalSeconds + timeDifference) / match.Track2Time.TotalSeconds;
-                // Apply the new time stretch factor if it has changed
-                if (Math.Abs(newFactor - lastFactor) > 0.01) // Adjust threshold to your needs
-                {
-                    Console.WriteLine("Adjusting playback rate to " + newFactor);
-                    stretchProvider.PlaybackRate = (float)newFactor;
-                    lastFactor = (float)newFactor;
-                }
+                double stretchFactor = (nextMatch.Track2Time.TotalSeconds + timeDifference) /
+                                       nextMatch.Track2Time.TotalSeconds;
+
+                Console.WriteLine("Adjusting playback rate to " + stretchFactor);
+                stretchProvider.PlaybackRate = (float)stretchFactor;
             }
 
             // Read samples from the stretch provider and write them to the output file
             float[] buffer =
-                new float[writer.WaveFormat.SampleRate * writer.WaveFormat.Channels]; // One second of audio
-            int samplesRead;
-            while ((samplesRead = stretchProvider.Read(buffer, 0, buffer.Length)) > 0)
-            {
-                writer.WriteSamples(buffer, 0, samplesRead);
-            }
+                new float[(int)Math.Round(writer.WaveFormat.SampleRate * writer.WaveFormat.Channels * runTime)];
+            int samplesRead = stretchProvider.Read(buffer, 0, buffer.Length);
+
+            if (samplesRead == 0) continue;
+            writer.WriteSamples(buffer, 0, samplesRead);
         }
-        
-        
     }
 
     static void ConvertToMp3(string outputAudioPath)
