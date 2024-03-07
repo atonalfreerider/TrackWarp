@@ -12,8 +12,16 @@
       <PackageReference Include="Aurio.PFFFT" Version="4.2.1" />
       <PackageReference Include="Aurio.Soxr" Version="4.2.1" />
       <PackageReference Include="NAudio" Version="2.2.1" />
+      <PackageReference Include="NAudio.Lame" Version="2.1.0" />
       <PackageReference Include="SoundTouch.Net" Version="2.3.2" />
       <PackageReference Include="System.CommandLine.NamingConventionBinder" Version="2.0.0-beta4.22272.1" />
+        <None Include="SoundTouch.dll">
+            <Link>SoundTouch.dll</Link>
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </None>
+        <None Include="SoundTouch_x64.dll">
+            <Link>SoundTouch_x64.dll</Link>
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </None>
     </ItemGroup>
-
 </Project>

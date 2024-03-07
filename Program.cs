@@ -9,6 +9,7 @@ using Aurio.Project;
 using Aurio.Resampler;
 using Aurio.Streams;
 using Aurio.TaskMonitor;
+using NAudio.Lame;
 using NAudio.Wave;
 using VarispeedDemo.SoundTouch;
 
@@ -82,6 +83,12 @@ class Program
         }
 
         WriteToWav(outputAudioPath, matches, warpAudioPath);
+        ConvertToMp3(outputAudioPath);
+        
+        string waveOutPath = Path.ChangeExtension(outputAudioPath, ".wav");
+        File.Delete(waveOutPath);
+        
+        Console.WriteLine("Wrote warped audio to " + outputAudioPath);
     }
 
     static List<Match> TimeWarp(
@@ -101,7 +108,7 @@ class Program
         bool timeWarpSmoothing)
     {
         TimeSpan timeWarpSearchWidth = TimeSpan.FromSeconds(searchWidth);
-        ProgressMonitor progressMonitor = new ProgressMonitor();
+        ProgressMonitor progressMonitor = new();
 
         IAudioStream s1 = t1.CreateAudioStream();
         IAudioStream s2 = t2.CreateAudioStream();
@@ -287,18 +294,19 @@ class Program
 
     static void WriteToWav(string outputAudioPath, List<Match> matches, string warpAudioPath)
     {
-        using Mp3SampleProvider provider = new Mp3SampleProvider(warpAudioPath);
+        using Mp3SampleProvider provider = new(warpAudioPath);
 
         ISampleProvider warpSampleProvider = provider.GetSampleProvider();
 
         // Prepare the audio for time stretching
-        VarispeedSampleProvider stretchProvider = new VarispeedSampleProvider(
+        VarispeedSampleProvider stretchProvider = new(
             warpSampleProvider,
             100,
             new SoundTouchProfile(false, true));
 
         // Create a new WaveFileWriter to output the warped audio
-        using WaveFileWriter writer = new WaveFileWriter(outputAudioPath, stretchProvider.WaveFormat);
+        string waveOutPath = Path.ChangeExtension(outputAudioPath, ".wav");
+        using WaveFileWriter writer = new(waveOutPath, stretchProvider.WaveFormat);
         float lastFactor = 1.0f; // Start with no stretch
         foreach (Match match in matches)
         {
@@ -326,7 +334,17 @@ class Program
                 writer.WriteSamples(buffer, 0, samplesRead);
             }
         }
+        
+        
+    }
 
-        Console.WriteLine("Wrote warped audio to " + outputAudioPath);
+    static void ConvertToMp3(string outputAudioPath)
+    {
+        string mp3FileName = Path.ChangeExtension(outputAudioPath, ".mp3");
+        string waveOutPath = Path.ChangeExtension(outputAudioPath, ".wav");
+
+        using WaveFileReader reader = new(waveOutPath);
+        using LameMP3FileWriter mp3Writer = new(mp3FileName, reader.WaveFormat, LAMEPreset.STANDARD);
+        reader.CopyTo(mp3Writer);
     }
 }

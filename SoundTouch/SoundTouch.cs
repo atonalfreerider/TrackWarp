@@ -22,7 +22,7 @@ class SoundTouch : IDisposable
         {
             if (versionString == null)
             {
-                StringBuilder s = new StringBuilder(100);
+                StringBuilder s = new(100);
                 if (is64Bit)
                     SoundTouchInterop64.soundtouch_getVersionString2(s, s.Capacity);
                 else
