@@ -33,11 +33,7 @@ class VarispeedSampleProvider : ISampleProvider, IDisposable
     {
         if (playbackRate <= float.Epsilon) // play silence
         {
-            for (int n = 0; n < count; n++)
-            {
-                buffer[offset++] = 0;
-            }
-
+            Array.Clear(buffer, offset, count); // More efficient way to set silence
             return count;
         }
 
@@ -51,31 +47,43 @@ class VarispeedSampleProvider : ISampleProvider, IDisposable
         bool reachedEndOfSource = false;
         while (samplesRead < count)
         {
-            if (soundTouch.NumberOfSamplesAvailable == 0)
+            if (soundTouch.NumberOfSamplesAvailable == 0 && !reachedEndOfSource)
             {
+                // Read from the source into the temporary buffer
                 int readFromSource = sourceProvider.Read(sourceReadBuffer, 0, sourceReadBuffer.Length);
+
                 if (readFromSource > 0)
                 {
+                    // We have successfully read from source, put samples into SoundTouch
                     soundTouch.PutSamples(sourceReadBuffer, readFromSource / channelCount);
                 }
                 else
                 {
+                    // No more samples are available from the source, indicate we've reached the end
+                    Console.WriteLine("Reached end of source, indicating to SoundTouch.");
                     reachedEndOfSource = true;
-                    // we've reached the end, tell SoundTouch we're done
-                    soundTouch.Flush();
+                    soundTouch.Flush(); // Indicate to SoundTouch that no more samples will be put
                 }
             }
 
+            // Calculate the number of sample frames we still need to process
             int desiredSampleFrames = (count - samplesRead) / channelCount;
 
+            // Try to receive processed samples from SoundTouch
             int received = soundTouch.ReceiveSamples(soundTouchReadBuffer, desiredSampleFrames) * channelCount;
-            // use loop instead of Array.Copy due to WaveBuffer
+
+            // Copy the received samples to the output buffer
             for (int n = 0; n < received; n++)
             {
                 buffer[offset + samplesRead++] = soundTouchReadBuffer[n];
             }
 
-            if (received == 0 && reachedEndOfSource) break;
+            // Break out of the loop if we received no new samples and we've reached the end of the source
+            if (received == 0 && reachedEndOfSource) 
+            {
+                Console.WriteLine("Received 0 samples and reached end of source, breaking out of loop.");
+                return 0;
+            }
         }
 
         return samplesRead;
