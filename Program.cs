@@ -305,6 +305,7 @@ class Program
         // Create a new WaveFileWriter to output the warped audio
         string waveOutPath = Path.ChangeExtension(outputAudioPath, ".wav");
         using WaveFileWriter writer = new(waveOutPath, stretchProvider.WaveFormat);
+        double aggregateOffset = 0;
         for (int i = 0; i < matches.Count - 1; i++)
         {
             Match match = matches[i];
@@ -313,12 +314,14 @@ class Program
             double runTime = nextMatch.Track2Time.TotalSeconds - match.Track2Time.TotalSeconds;
 
             // Calculate the time stretch factor required to align this peak with the corresponding peak in the base track
-            double timeDifference = nextMatch.Offset.TotalSeconds;
+            double timeDifference = nextMatch.Offset.TotalSeconds - aggregateOffset;
+            aggregateOffset += timeDifference;
+            
             if (Math.Abs(timeDifference) > float.Epsilon)
             {
                 // Calculate the new stretch factor, ensuring no division by zero
-                double stretchFactor = (nextMatch.Track2Time.TotalSeconds + timeDifference) /
-                                       nextMatch.Track2Time.TotalSeconds;
+                double stretchFactor = (nextMatch.Track2Time.TotalSeconds - match.Track2Time.TotalSeconds - timeDifference) /
+                                       (nextMatch.Track2Time.TotalSeconds - match.Track2Time.TotalSeconds);
 
                 Console.WriteLine("Adjusting playback rate to " + stretchFactor);
                 stretchProvider.PlaybackRate = (float)stretchFactor;
